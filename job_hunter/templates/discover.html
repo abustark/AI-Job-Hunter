@@ -1,0 +1,76 @@
+{% extends 'base.html' %}
+{% block title %}Discover · AI Job Hunter{% endblock %}
+{% block content %}
+<section class="page-heading compact">
+  <div>
+    <p class="eyebrow">USER-TRIGGERED SCAN</p>
+    <h1>Discover jobs</h1>
+    <p class="muted">Search one source at a time. Source coverage is limited and each provider may be temporarily unavailable.</p>
+  </div>
+</section>
+
+<nav class="filter-tabs" aria-label="Job market">
+  <a class="button {{ 'primary' if scope == 'India' else 'secondary' }}" href="{{ url_for('main.discover', scope='India') }}" {% if scope == 'India' %}aria-current="page"{% endif %}>India Jobs</a>
+  <a class="button {{ 'primary' if scope == 'International' else 'secondary' }}" href="{{ url_for('main.discover', scope='International', country=country) }}" {% if scope == 'International' %}aria-current="page"{% endif %}>International Jobs</a>
+</nav>
+
+<div class="columns">
+  <section class="panel">
+    <h2>{% if scope == 'India' %}Search in India{% else %}Search internationally{% endif %}</h2>
+    <p class="muted">Listings are saved as <b>To Review</b>. No application action is automated.</p>
+    {% if scope == 'India' %}
+      <p class="notice">India scans pass India as the country filter where the source supports it. Remotive has no dependable India filter, so it is available only in International Jobs.</p>
+    {% else %}
+      <p class="notice">Choose a country to keep this search scoped. Remote eligibility and visa details are shown only when a source provides them.</p>
+    {% endif %}
+    {% if sources %}
+    <form method="post" class="form-stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="scope" value="{{ scope }}">
+      <label>Source
+        <select name="source" required>
+          {% for s in sources %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+        </select>
+      </label>
+      {% if scope == 'International' %}
+      <label>Country or region
+        <input name="country" value="{{ country }}" list="international-countries" maxlength="80" placeholder="e.g. United States" required>
+        <datalist id="international-countries">{% for item in countries %}<option value="{{ item }}">{% endfor %}</datalist>
+        <small>Saved country preferences are suggestions; you can search another destination here.</small>
+      </label>
+      {% endif %}
+      <label>Search phrase
+        <input name="query" maxlength="100" value="Data Analyst" required>
+        <small>Try Data Analyst, BI Analyst, or Python Analyst.</small>
+      </label>
+      <button class="button primary" type="submit">Start scan</button>
+    </form>
+    {% else %}
+      <div class="empty-state"><h3>No source enabled for this market</h3><p>Enable a source in Settings. Company board sources also need board tokens.</p><a class="button secondary" href="{{ url_for('main.settings') }}">Open Settings</a></div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <p class="eyebrow">SOURCES FOR THIS SEARCH</p>
+    <h2>{% if scope == 'India' %}India coverage{% else %}International coverage{% endif %}</h2>
+    {% if scope == 'India' %}
+      <div class="source-info"><strong>Himalayas</strong><p>Public remote-job feed; the India country filter is sent to the provider. It does not cover on-site listings.</p></div>
+      <div class="source-info"><strong>Greenhouse and Lever</strong><p>Public company career boards, when configured in Settings. Results depend on the board tokens you provide.</p></div>
+    {% else %}
+      <div class="source-info"><strong>Himalayas</strong><p>Public remote-job feed; selected country is sent to the provider. The source may include globally eligible jobs.</p></div>
+      <div class="source-info"><strong>Remotive</strong><p>Public remote-job feed without a country filter; results are conservatively filtered against stated eligibility.</p></div>
+      <div class="source-info"><strong>Greenhouse and Lever</strong><p>Public company career boards, when configured in Settings. Coverage depends on your selected boards.</p></div>
+    {% endif %}
+    <p class="muted small">No source covers the entire market. Each request happens only after you press Start scan. Listings retain their source links and attribution.</p>
+  </section>
+</div>
+
+<section class="panel">
+  <div class="panel-head"><h2>Scan history · {{ scope }}</h2><a href="{{ url_for('main.settings') }}">Source settings →</a></div>
+  {% if scans %}
+  <div class="table-wrap"><table><thead><tr><th>Source</th><th>Started (UTC)</th><th>Outcome</th><th>Fetched</th><th>Added</th><th>Duplicates</th></tr></thead><tbody>
+    {% for s in scans %}<tr><td>{{ s.source }}{% if s.country %}<small>{{ s.country }}</small>{% endif %}</td><td>{{ s.started_at[:16].replace('T',' ') }}</td><td>{{ s.outcome }}{% if s.error %}<small>{{ s.error }}</small>{% endif %}</td><td>{{ s.fetched }}</td><td>{{ s.added }}</td><td>{{ s.duplicates }}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% else %}<p class="muted">No scans have run for this market.</p>{% endif %}
+</section>
+{% endblock %}

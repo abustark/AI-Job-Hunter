@@ -1,0 +1,14 @@
+.venv/
+.vercel/
+__pycache__/
+*.py[cod]
+.env
+instance/*.sqlite3
+instance/.secret_key
+instance/uploads/
+instance/exports/
+instance/backups/
+instance/import-previews/
+*.log
+.pytest_cache/
+.coverage

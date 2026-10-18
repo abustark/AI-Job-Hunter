@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+{% block title %}Jobs · AI Job Hunter{% endblock %}
+{% block content %}
+<section class="page-heading compact">
+  <div><p class="eyebrow">OPPORTUNITIES</p><h1>{% if scope == 'International' %}International Jobs{% else %}India Jobs{% endif %}</h1><p class="muted">Review, search, and prioritize roles in the selected market.</p></div>
+  <div class="actions"><a class="button secondary" href="{{ url_for('main.import_csv') }}">Import CSV</a><a class="button primary" href="{{ url_for('main.add_job') }}">Add job</a></div>
+</section>
+<nav class="filter-tabs" aria-label="Job market">
+  <a class="button {{ 'primary' if scope == 'India' else 'secondary' }}" href="{{ url_for('main.jobs', scope='India') }}" {% if scope == 'India' %}aria-current="page"{% endif %}>India Jobs</a>
+  <a class="button {{ 'primary' if scope == 'International' else 'secondary' }}" href="{{ url_for('main.jobs', scope='International') }}" {% if scope == 'International' %}aria-current="page"{% endif %}>International Jobs</a>
+</nav>
+<form class="filter-bar" method="get">
+  <input type="hidden" name="scope" value="{{ scope }}">
+  <label class="search-field">Search <input name="q" value="{{ q }}" placeholder="Roles, companies, skills…" aria-label="Search jobs"></label>
+  <select name="status" aria-label="Filter by status"><option value="">All statuses</option>{% for s in statuses %}<option value="{{ s }}" {{ 'selected' if status==s }}>{{ s }}</option>{% endfor %}</select>
+  <select name="source" aria-label="Filter by source"><option value="">All sources</option>{% for s in sources %}<option value="{{ s }}" {{ 'selected' if source==s }}>{{ s }}</option>{% endfor %}</select>
+  <select name="work_mode" aria-label="Filter by work mode"><option value="">All work modes</option>{% for m in ['Remote','Hybrid','On-site','Unknown'] %}<option value="{{ m }}" {{ 'selected' if work_mode==m }}>{{ m }}</option>{% endfor %}</select>
+  <input name="location" value="{{ location }}" placeholder="Location" aria-label="Filter by location">
+  <input name="min_score" type="number" min="0" max="100" value="{{ min_score }}" placeholder="Min score" aria-label="Minimum match score">
+  <select name="sort" aria-label="Sort jobs"><option value="match" {{ 'selected' if sort=='match' }}>Best match</option><option value="newest" {{ 'selected' if sort=='newest' }}>Recently added</option><option value="location" {{ 'selected' if sort=='location' }}>Location priority</option></select>
+  <button class="button secondary" type="submit">Filter</button>
+</form>
+<div class="list-toolbar"><span>{{ jobs|length }} roles shown · scores reflect your editable preferences</span><a href="{{ url_for('main.export_csv') }}">Export CSV</a></div>
+{% if jobs %}<div class="job-list">{% for job in jobs %}{% include 'partials/job_card.html' %}{% endfor %}</div>
+{% else %}<div class="panel empty"><h3>No roles in this view yet</h3><p>Change a filter, add a job manually, or scan this market.</p><a class="button primary" href="{{ url_for('main.discover', scope=scope) }}">Discover {{ 'India' if scope == 'India' else 'international' }} jobs</a></div>{% endif %}
+{% endblock %}
