@@ -4,9 +4,10 @@ import sqlite3
 
 import pytest
 import requests
+from werkzeug.security import generate_password_hash
 
 from job_hunter import create_app
-from job_hunter.db import init_db, query
+from job_hunter.db import init_db, query, postgres_sql
 from job_hunter.matching import score
 from job_hunter.sources import _get_with_connection_retry, fetch_himalayas, fetch_remotive
 from job_hunter.routes import SOURCES as ROUTE_SOURCES
@@ -22,6 +23,37 @@ def test_app_starts_and_dashboard_renders(app):
     response=app.test_client().get("/")
     assert response.status_code==200
     assert b"Review queue" in response.data
+
+
+def test_hosted_dashboard_requires_owner_login(tmp_path):
+    app=create_app({"TESTING":True,"WTF_CSRF_ENABLED":False,"DATABASE":str(tmp_path/"hosted.sqlite3"),"SECRET_KEY":"test-only","AUTH_REQUIRED":True,"OWNER_PASSWORD_HASH":generate_password_hash("correct horse battery staple")})
+    client=app.test_client()
+    assert client.get("/").status_code==302
+    assert client.get("/backup.json").status_code==302
+    assert client.get("/resume/download").status_code==302
+    assert client.post("/jobs/add",data={"title":"Analyst","company":"Acme"}).status_code==302
+    response=client.post("/login",data={"password":"incorrect"},follow_redirects=True)
+    assert b"Invalid password" in response.data
+    response=client.post("/login",data={"password":"correct horse battery staple"},follow_redirects=True)
+    assert response.status_code==200 and b"Review queue" in response.data
+    client.post("/logout")
+    assert client.get("/profile").status_code==302
+
+
+def test_login_session_cookie_is_secure_for_https(tmp_path):
+    app=create_app({"TESTING":True,"WTF_CSRF_ENABLED":True,"DATABASE":str(tmp_path/"secure-cookie.sqlite3"),"SECRET_KEY":"test-only","AUTH_REQUIRED":True,"OWNER_PASSWORD_HASH":generate_password_hash("correct horse battery staple"),"SESSION_COOKIE_SECURE":True})
+    response=app.test_client().get("/login",base_url="https://jobs.example.test")
+    assert response.status_code==200
+    assert "Secure" in response.headers["Set-Cookie"] and "HttpOnly" in response.headers["Set-Cookie"]
+    assert response.headers["Strict-Transport-Security"].startswith("max-age=")
+
+
+def test_production_requires_durable_database_and_owner_auth(monkeypatch, tmp_path):
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("OWNER_PASSWORD_HASH", raising=False)
+    with pytest.raises(RuntimeError,match="DATABASE_URL"):
+        create_app({"TESTING":False,"INSTANCE_PATH":str(tmp_path)})
 
 
 def test_discover_separates_india_and_international_scopes(app):
@@ -54,6 +86,19 @@ def test_database_initialization_is_repeatable(tmp_path):
     path=tmp_path/"repeat.sqlite3"
     init_db(str(path)); init_db(str(path))
     assert query(str(path),"SELECT COUNT(*) n FROM profile")[0]["n"]==1
+
+
+def test_postgres_sql_adapter_translates_supported_sql():
+    assert postgres_sql("SELECT * FROM jobs WHERE id=?") == "SELECT * FROM jobs WHERE id=%s"
+    assert postgres_sql("INSERT OR IGNORE INTO profile(id,data) VALUES(1,'{}')").endswith("ON CONFLICT (id) DO NOTHING")
+
+
+def test_resume_upload_is_persisted_in_database(app):
+    client=app.test_client()
+    response=client.post("/resume/upload",data={"resume":(io.BytesIO(b"not a real pdf"),"resume.pdf")},content_type="multipart/form-data",follow_redirects=True)
+    assert response.status_code==200
+    stored=query(app.config["DATABASE"],"SELECT filename,content FROM resume_files")[0]
+    assert stored["filename"]=="resume.pdf" and bytes(stored["content"])==b"not a real pdf"
 
 
 def test_manual_job_is_added_and_can_be_updated(app):

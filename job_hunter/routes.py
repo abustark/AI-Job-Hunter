@@ -4,15 +4,15 @@ import json
 import re
 import secrets
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
-from flask import Blueprint, current_app, flash, make_response, redirect, render_template, request, session, url_for
+from flask import Blueprint, current_app, flash, make_response, redirect, render_template, request, session, url_for, send_file
 import requests
 from werkzeug.utils import secure_filename
 
-from .db import connect, execute, query
+from .db import connect, execute, query, is_postgres
 from .matching import score
 from .sources import SOURCES
 
@@ -23,6 +23,48 @@ NOW = lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def db(): return current_app.config["DATABASE"]
+
+
+@bp.route("/login", methods=["GET", "POST"])
+def login():
+    if not current_app.config["AUTH_REQUIRED"]:
+        return redirect(url_for("main.dashboard"))
+    if session.get("owner_authenticated"):
+        return redirect(url_for("main.dashboard"))
+    next_path=request.args.get("next", "")
+    if request.method=="POST":
+        next_path=request.form.get("next", "")
+        remote_addr=request.remote_addr or "unknown"
+        cutoff=(datetime.now(timezone.utc)-timedelta(minutes=15)).isoformat(timespec="seconds")
+        execute(db(),"DELETE FROM login_attempts WHERE attempted_at<?",(cutoff,))
+        recent=query(db(),"SELECT COUNT(*) AS n FROM login_attempts WHERE remote_addr=? AND attempted_at>=?",(remote_addr,cutoff))[0]["n"]
+        if recent>=8:
+            flash("Too many unsuccessful sign-in attempts. Wait 15 minutes and try again.","error")
+        else:
+            password=request.form.get("password", "")
+            valid=False
+            try:
+                valid=current_app.config["PASSWORD_CHECK"](current_app.config["OWNER_PASSWORD_HASH"],password)
+            except (ValueError,TypeError):
+                valid=False
+            if valid:
+                execute(db(),"DELETE FROM login_attempts WHERE remote_addr=?",(remote_addr,))
+                session.clear(); session["owner_authenticated"]=True; session.permanent=True
+                if next_path.startswith("/") and not next_path.startswith("//"):
+                    return redirect(next_path)
+                return redirect(url_for("main.dashboard"))
+            execute(db(),"INSERT INTO login_attempts(remote_addr,attempted_at) VALUES(?,?)",(remote_addr,NOW()))
+            flash("Invalid password.","error")
+    if not (next_path.startswith("/") and not next_path.startswith("//")):
+        next_path=""
+    return render_template("login.html", next_path=next_path)
+
+
+@bp.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    flash("You have signed out.","success")
+    return redirect(url_for("main.login"))
 
 
 def get_profile():
@@ -40,7 +82,7 @@ def enrich(rows, profile):
 
 
 @bp.app_context_processor
-def global_context(): return {"statuses": STATUSES, "nav_endpoint": request.endpoint}
+def global_context(): return {"statuses": STATUSES, "nav_endpoint": request.endpoint, "auth_required": current_app.config["AUTH_REQUIRED"], "authenticated": bool(session.get("owner_authenticated")), "hosted_mode": is_postgres(db())}
 
 
 @bp.route("/")
@@ -162,21 +204,33 @@ def upload_resume():
     if not f or not f.filename: flash("Choose a PDF or DOCX file.","error"); return redirect(url_for("main.profile"))
     name=secure_filename(f.filename)
     if Path(name).suffix.lower() not in (".pdf", ".docx"): flash("Only PDF and DOCX files are supported.","error"); return redirect(url_for("main.profile"))
-    folder=Path(current_app.config["UPLOAD_FOLDER"]); folder.mkdir(parents=True,exist_ok=True); dest=folder / name
-    if dest.exists(): dest=folder / f"{dest.stem}-{datetime.now().strftime('%Y%m%d%H%M%S')}{dest.suffix}"
-    f.save(dest)
+    from io import BytesIO
+    file_bytes=f.read()
+    if len(file_bytes)>5*1024*1024: flash("Resume files are limited to 5 MB.","error"); return redirect(url_for("main.profile"))
     text=""
     try:
-        if dest.suffix.lower()==".pdf":
+        if Path(name).suffix.lower()==".pdf":
             from pypdf import PdfReader
-            text="\n".join(page.extract_text() or "" for page in PdfReader(str(dest)).pages)
+            text="\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(file_bytes)).pages)
         else:
             from docx import Document
-            text="\n".join(p.text for p in Document(str(dest)).paragraphs)
-    except Exception: flash("File saved, but text extraction failed. Paste or edit resume text below.","error")
+            text="\n".join(p.text for p in Document(BytesIO(file_bytes)).paragraphs)
+    except Exception: flash("Resume stored, but text extraction failed. Paste or edit resume text below.","error")
+    execute(db(),"INSERT INTO resume_files(filename,content,created_at) VALUES(?,?,?)",(name,file_bytes,NOW()))
+    p=get_profile(); p["resume_file"]=name
     if text:
-        p=get_profile(); p["resume_text"]=text[:50000]; p["resume_file"]=dest.name; execute(db(),"UPDATE profile SET data=? WHERE id=1",(json.dumps(p),)); flash("Resume stored locally and extracted for your review.","success")
+        p["resume_text"]=text[:50000]
+    execute(db(),"UPDATE profile SET data=? WHERE id=1",(json.dumps(p),))
+    if text: flash("Resume stored securely and extracted for your review.","success")
     return redirect(url_for("main.profile"))
+
+
+@bp.route("/resume/download")
+def download_resume():
+    rows=query(db(),"SELECT filename,content FROM resume_files ORDER BY id DESC LIMIT 1")
+    if not rows: return render_template("not_found.html"),404
+    from io import BytesIO
+    return send_file(BytesIO(bytes(rows[0]["content"])),download_name=rows[0]["filename"],as_attachment=True)
 
 
 @bp.route("/discover", methods=["GET","POST"])
@@ -196,8 +250,8 @@ def discover():
         boards=profile_data.get("greenhouse_boards",[]) if source=="Greenhouse" else profile_data.get("lever_boards",[]) if source=="Lever" else None
         if source in ("Greenhouse","Lever") and not boards:
             flash(f"Add at least one {source} company board token in Settings first.","error"); return redirect(url_for("main.discover",scope=scope,country=country))
-        window="-1 day"
-        recent=query(db(),"SELECT COUNT(*) n FROM scan_runs WHERE source=? AND scope=? AND COALESCE(country,'')=COALESCE(?,'') AND started_at>=datetime('now',?) AND outcome IN ('Success','Running')",(source,scope,country or None,window))[0]["n"]
+        scan_cutoff=(datetime.now(timezone.utc)-timedelta(days=1)).isoformat(timespec="seconds")
+        recent=query(db(),"SELECT COUNT(*) n FROM scan_runs WHERE source=? AND scope=? AND COALESCE(country,'')=COALESCE(?,'') AND started_at>=? AND outcome IN ('Success','Running')",(source,scope,country or None,scan_cutoff))[0]["n"]
         daily_limit=1 if source=="Himalayas" else 4
         if recent>=daily_limit:
             flash(f"{source} was already scanned {recent} time(s) for this market in the last day. Its public feed updates slowly; try again later.","error")
@@ -236,9 +290,12 @@ def discover():
             outcome="Error"
         except Exception as e:
             current_app.logger.exception("Unexpected %s scan failure", source)
-            detail=" ".join(str(e).split())[:180]
-            error_type=f"{type(e).__module__}.{type(e).__name__}"
-            err=f"{source} scan failed unexpectedly ({error_type})"+(f": {detail}" if detail else ". See the application log for details.")
+            if type(e).__module__.startswith("psycopg"):
+                err=f"Could not save {source} results to the hosted database. Check the deployment logs."
+            else:
+                detail=" ".join(str(e).split())[:180]
+                error_type=f"{type(e).__module__}.{type(e).__name__}"
+                err=f"{source} scan failed unexpectedly ({error_type})"+(f": {detail}" if detail else ". See the application log for details.")
             outcome="Error"
         execute(db(),"UPDATE scan_runs SET finished_at=?,outcome=?,fetched=?,added=?,duplicates=?,error=? WHERE id=?",(NOW(),outcome,fetched,added,dupes,err,run))
         flash(f"{source}: fetched {fetched}, added {added}, duplicates refreshed/skipped {dupes}."+(f" {err}" if err else ""),"error" if err else "success")
@@ -268,17 +325,17 @@ def import_csv():
         try:
             if confirm:
                 token=session.pop("import_preview", "")
-                preview_path=Path(current_app.instance_path) / "import-previews" / f"{token}.json"
-                if not token or not preview_path.is_file(): raise ValueError("The import preview expired. Upload the file again.")
-                rows=json.loads(preview_path.read_text(encoding="utf-8")); preview_path.unlink(missing_ok=True)
+                preview=query(db(),"SELECT content,expires_at FROM import_previews WHERE token=?",(token,)) if token else []
+                if not preview or preview[0]["expires_at"]<NOW(): raise ValueError("The import preview expired. Upload the file again.")
+                rows=json.loads(preview[0]["content"]); execute(db(),"DELETE FROM import_previews WHERE token=?",(token,))
             else:
                 if not upload or not upload.filename.lower().endswith(".csv"): flash("Choose a CSV file.","error"); return redirect(url_for("main.import_csv"))
                 rows=list(csv.DictReader(io.TextIOWrapper(upload.stream,encoding="utf-8-sig")))
             if len(rows)>1000: raise ValueError("Import is limited to 1,000 rows at a time.")
             if not confirm:
                 token=secrets.token_urlsafe(18)
-                preview_dir=Path(current_app.instance_path) / "import-previews"; preview_dir.mkdir(parents=True,exist_ok=True)
-                (preview_dir/f"{token}.json").write_text(json.dumps(rows,ensure_ascii=False),encoding="utf-8")
+                execute(db(),"DELETE FROM import_previews WHERE expires_at<?",(NOW(),))
+                execute(db(),"INSERT INTO import_previews(token,content,expires_at) VALUES(?,?,?)",(token,json.dumps(rows,ensure_ascii=False),(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(timespec="seconds")))
                 session["import_preview"]=token
                 return render_template("import.html", preview=rows[:10], total=len(rows), uploaded=True, error=None)
             count=0

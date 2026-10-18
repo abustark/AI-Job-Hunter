@@ -43,6 +43,6 @@ With the environment active, run `python -m pytest`. Tests use temporary databas
 
 ## Hosting
 
-This release is intended for one computer and binds only to `127.0.0.1`. Do not expose it to the public internet: it has no user authentication. Local SQLite and uploaded files are not reliable persistent storage for Vercel serverless functions. A future hosted version needs authentication, CSRF/session hardening, durable shared storage such as managed Postgres/object storage, and a separately managed discovery worker. The local app runs only while the computer is on.
+The local Windows setup remains the no-cost, SQLite-backed option. A hosted deployment uses the Flask dashboard at the repository root, a PostgreSQL `DATABASE_URL`, and an owner-only password. Vercel does not make SQLite files or local folders durable across function invocations. Resume originals and CSV import previews are stored in the configured database in hosted mode. The local SQLite database and resume files are never uploaded automatically.
 
-The Vercel project in `vercel-site/` is an informational landing page only. It does not host the Flask dashboard or any personal job, profile, or resume data.
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for Vercel configuration. The `vercel-site/` folder is the previous informational page; Vercel must deploy from the repository root to serve the dashboard.
